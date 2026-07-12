@@ -1,0 +1,31 @@
+# Segreti — MAI committare
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+
+# Node
+node_modules/
+npm-debug.log*
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# Log e output del bot
+*.log
+*.jsonl
+bot_out*
+
+# Sistema operativo / editor
+.DS_Store
+Thumbs.db
+*:Zone.Identifier
+.vscode/
+.idea/
+
+# Kill switch locale
+KILL_SWITCH
