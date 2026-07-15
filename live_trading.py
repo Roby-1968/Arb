@@ -1,16 +1,3 @@
-"""
-Sessione LIVE di prova: stessa logica del paper trading,
-ma con ordini REALI sul CLOB di Polymarket.
-
-GUARD-RAIL ATTIVI (config.py):
-  - LIVE_MAX_USD_PER_TRADE  : tetto per singolo ordine
-  - LIVE_MAX_OPEN_POSITIONS : massimo posizioni contemporanee
-  - LIVE_MAX_TOTAL_USD      : capitale totale massimo impegnabile
-  - conferma interattiva all'avvio (digitare LIVE)
-  - kill switch: crea un file chiamato STOP nella directory
-    e il bot chiude il loop al ciclo successivo.
-"""
-
 from __future__ import annotations
 
 import json
@@ -38,6 +25,10 @@ logger = logging.getLogger("live_trading")
 LEDGER_PATH = Path("live_ledger.json")
 KILL_SWITCH = Path("STOP")
 
+
+# ============================================================
+# DATA STRUCTURES
+# ============================================================
 
 @dataclass
 class LivePosition:
@@ -70,6 +61,10 @@ class LiveLedger:
         return sum(p.size_usd for p in self.open_positions)
 
 
+# ============================================================
+# LEDGER LOAD/SAVE
+# ============================================================
+
 def _load() -> LiveLedger:
     lg = LiveLedger()
     if LEDGER_PATH.exists():
@@ -89,27 +84,27 @@ def _save(lg: LiveLedger) -> None:
     }, indent=2))
 
 
-def _confirm() -> bool:
-    print("\n" + "=" * 52)
-    print("  ⚠️  SESSIONE LIVE — CAPITALE REALE A RISCHIO  ⚠️")
-    print(f"  Max per ordine .......... {LIVE_MAX_USD_PER_TRADE:.2f}$")
-    print(f"  Max posizioni aperte .... {LIVE_MAX_OPEN_POSITIONS}")
-    print(f"  Max capitale impegnato .. {LIVE_MAX_TOTAL_USD:.2f}$")
-    print("  Kill switch: crea un file 'STOP' per fermare il bot")
-    print("=" * 52)
-    return input("  Digita LIVE per confermare: ").strip() == "LIVE"
-
+# ============================================================
+# LIVE TRADING LOOP (MODIFICATO)
+# ============================================================
 
 def run_live():
     logging.basicConfig(
         level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s"
     )
-    if not _confirm():
-        print("Annullato.")
-        return
+
+    # 🔥 AVVIO AUTOMATICO (senza input)
+    print("\n" + "=" * 52)
+    print("  ⚠️  SESSIONE LIVE — AVVIO AUTOMATICO (GitHub Actions) ⚠️")
+    print(f"  Max per ordine .......... {LIVE_MAX_USD_PER_TRADE:.2f}$")
+    print(f"  Max posizioni aperte .... {LIVE_MAX_OPEN_POSITIONS}")
+    print(f"  Max capitale impegnato .. {LIVE_MAX_TOTAL_USD:.2f}$")
+    print("  Kill switch: crea un file 'STOP' per fermare il bot")
+    print("=" * 52)
 
     execu = Executor()  # fallisce subito se .env incompleto
     ledger = _load()
+
     logger.info(
         "Live avviato: %d posizioni aperte, PnL storico %+.2f$",
         len(ledger.open_positions), ledger.realized_pnl,
@@ -117,13 +112,20 @@ def run_live():
     tg.send("🔴 <b>SESSIONE LIVE AVVIATA</b> — capitale reale")
 
     loop = 0
+
     while True:
         loop += 1
+
+        # 🔥 Kill switch
         if KILL_SWITCH.exists():
             logger.warning("File STOP rilevato: esco dal loop")
             tg.send("🛑 Kill switch attivato, bot live fermato")
             break
+
         try:
+            # ============================================================
+            # FETCH DATI
+            # ============================================================
             leaders = fetch_leaderboard(period="30d", limit=50)
             qualified = rank_traders(leaders)
             signals, market_prices = generate_signals(qualified)
@@ -133,40 +135,48 @@ def run_live():
             if missing:
                 market_prices.update(fetch_market_prices(missing))
 
-            # --- anti-churn (come nel paper) ---
+            # ============================================================
+            # ANTI-CHURN
+            # ============================================================
             sell_keys = {(s.market_id, s.outcome) for s in signals if s.action == "SELL"}
             now = datetime.now(timezone.utc)
             recently_closed = set()
+
             for p in ledger.positions:
                 if p.closed and p.closed_at:
                     age = (now - datetime.fromisoformat(p.closed_at)).total_seconds() / 60
                     if age < 30:
                         recently_closed.add((p.market_id, p.outcome))
 
-            # --- APERTURE ---
-            # Un solo tentativo per (mercato, outcome) per loop:
-            # i segnali duplicati (più trade sullo stesso mercato)
-            # non devono generare ordini ripetuti, specie se falliti.
+            # ============================================================
+            # APERTURE POSIZIONI
+            # ============================================================
             attempted: set[tuple[str, str]] = set()
+
             for sig in signals:
                 if sig.action != "BUY" or not sig.token_id:
                     continue
+
                 key = (sig.market_id, sig.outcome)
                 if key in attempted:
                     continue
                 attempted.add(key)
+
                 if key in sell_keys or key in recently_closed:
                     continue
+
                 if any(p.market_id == sig.market_id and p.outcome == sig.outcome
                        for p in ledger.open_positions):
                     continue
-                # guard-rail
+
+                # Guard-rail
                 if len(ledger.open_positions) >= LIVE_MAX_OPEN_POSITIONS:
-                    logger.info("Max posizioni raggiunto (%d), niente nuove entry",
-                                LIVE_MAX_OPEN_POSITIONS)
+                    logger.info("Max posizioni raggiunto, niente nuove entry")
                     break
+
                 size = min(LIVE_MAX_USD_PER_TRADE,
                            LIVE_MAX_TOTAL_USD - ledger.committed)
+
                 if size < 1.0:
                     logger.info("Capitale massimo impegnato, niente nuove entry")
                     break
@@ -174,43 +184,49 @@ def run_live():
                 resp, px, shares = execu.buy(sig.token_id, size)
                 if resp is None:
                     continue
-                # Fill REALI dalla risposta del matching engine:
-                #   makingAmount = USDC effettivamente spesi
-                #   takingAmount = shares effettivamente ricevute
+
                 try:
                     real_usd = float(resp.get("makingAmount", 0)) or px * shares
                     real_shares = float(resp.get("takingAmount", 0)) or shares
                 except (TypeError, ValueError):
                     real_usd, real_shares = px * shares, shares
+
                 real_entry = real_usd / real_shares if real_shares else px
+
                 pos = LivePosition(
-                    market_id=sig.market_id, outcome=sig.outcome,
-                    token_id=sig.token_id, entry_price=real_entry,
-                    size_usd=real_usd, shares=real_shares,
+                    market_id=sig.market_id,
+                    outcome=sig.outcome,
+                    token_id=sig.token_id,
+                    entry_price=real_entry,
+                    size_usd=real_usd,
+                    shares=real_shares,
                     opened_at=datetime.now(timezone.utc).isoformat(),
                     source_trader=sig.trader_addr,
                 )
+
                 ledger.positions.append(pos)
                 ledger.history.append({"event": "OPEN", "ts": pos.opened_at, **asdict(pos)})
                 tg.alert_open(pos)
 
-            # --- CHIUSURE ---
-            # Stato di risoluzione da Gamma: i mercati risolti spariscono
-            # dal book, quindi il solo prezzo non basta a rilevarli.
+            # ============================================================
+            # CHIUSURE POSIZIONI
+            # ============================================================
             open_market_ids = {p.market_id for p in ledger.open_positions}
             markets_info = fetch_markets_info(open_market_ids)
 
             for pos in list(ledger.open_positions):
                 info = markets_info.get(pos.market_id, {})
                 resolved = info.get("closed", False)
+
                 px = info.get("prices", {}).get(
                     pos.outcome,
                     market_prices.get(pos.market_id, {}).get(pos.outcome),
                 )
+
                 reason = None
+
                 if resolved and px is not None:
-                    reason = ("market_resolved_win" if px >= 0.5
-                              else "market_resolved_loss")
+                    reason = ("market_resolved_win" if px >= 0.5 else "market_resolved_loss")
                 elif px is not None and px >= 0.999:
                     reason = "market_resolved_win"
                 elif px is not None and px <= 0.001:
@@ -218,19 +234,18 @@ def run_live():
                 elif any(s.market_id == pos.market_id and s.outcome == pos.outcome
                          and s.action == "SELL" for s in signals):
                     reason = "source_sell"
+
                 if reason is None:
                     continue
 
                 if "resolved" in reason and markets_info.get(pos.market_id, {}).get("closed"):
-                    # mercato risolto: niente book, settle al valore finale
                     resp, exit_px = None, None
                 else:
                     resp, exit_px = execu.sell(pos.token_id, pos.shares)
                     if resp is None and "resolved" not in reason:
-                        continue  # retry al prossimo loop
-                # a mercato risolto il redeem è on-chain; registro il valore finale
+                        continue
+
                 if resp is not None:
-                    # fill reale: takingAmount = USDC ricevuti, makingAmount = shares vendute
                     try:
                         usd_in = float(resp.get("takingAmount", 0))
                         sh_out = float(resp.get("makingAmount", 0))
@@ -239,27 +254,45 @@ def run_live():
                         final_px = exit_px
                 else:
                     final_px = 1.0 if "win" in reason else 0.0
+
                 pos.closed = True
                 pos.exit_price = final_px
                 pos.closed_at = datetime.now(timezone.utc).isoformat()
                 pos.pnl_usd = pos.shares * (final_px - pos.entry_price)
                 ledger.realized_pnl += pos.pnl_usd
-                ledger.history.append({"event": "CLOSE", "ts": pos.closed_at,
-                                       "reason": reason, **asdict(pos)})
+
+                ledger.history.append({
+                    "event": "CLOSE",
+                    "ts": pos.closed_at,
+                    "reason": reason,
+                    **asdict(pos)
+                })
+
                 tg.alert_close(pos, reason)
 
             logger.info(
                 "--- Loop %d | aperte=%d | impegnato=%.2f$ | PnL realizzato=%+.2f$",
                 loop, len(ledger.open_positions), ledger.committed, ledger.realized_pnl,
             )
+
             _save(ledger)
 
-        except Exception as e:  # noqa: BLE001
+        except Exception as e:
+            # 🔥 RESTART IMMEDIATO
             logger.exception("Errore nel loop %d: %s", loop, e)
+            tg.send(f"❌ Errore nel loop {loop}: {e}")
+            tg.send("♻️ Riavvio immediato del bot LIVE...")
+            time.sleep(3)
+            continue
 
         logger.info("In attesa %d secondi...", POLL_INTERVAL_SEC)
         time.sleep(POLL_INTERVAL_SEC)
 
 
+# ============================================================
+# MAIN — AVVIO AUTOMATICO
+# ============================================================
+
 if __name__ == "__main__":
+    print("Avvio automatico della SESSIONE LIVE (GitHub Actions)")
     run_live()
