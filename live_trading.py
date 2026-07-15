@@ -1,3 +1,4 @@
+
 from __future__ import annotations
 
 import json
@@ -296,3 +297,17 @@ def run_live():
 if __name__ == "__main__":
     print("Avvio automatico della SESSIONE LIVE (GitHub Actions)")
     run_live()
+
+
+"""
+Sessione LIVE di prova: stessa logica del paper trading,
+ma con ordini REALI sul CLOB di Polymarket.
+
+GUARD-RAIL ATTIVI (config.py):
+  - LIVE_MAX_USD_PER_TRADE  : tetto per singolo ordine
+  - LIVE_MAX_OPEN_POSITIONS : massimo posizioni contemporanee
+  - LIVE_MAX_TOTAL_USD      : capitale totale massimo impegnabile
+  - conferma interattiva all'avvio (digitare LIVE)
+  - kill switch: crea un file chiamato STOP nella directory
+    e il bot chiude il loop al ciclo successivo.
+"""
