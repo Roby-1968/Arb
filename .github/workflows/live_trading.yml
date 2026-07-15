@@ -1,0 +1,34 @@
+name: Live Trading Bot (Continuous)
+
+on:
+  workflow_dispatch:   # Avvio manuale
+  schedule:
+    - cron: "*/10 * * * *"   # Riavvia ogni 10 minuti se termina
+
+jobs:
+  run-bot:
+    runs-on: ubuntu-latest
+    timeout-minutes: 360     # 6 ore di esecuzione continua
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v3
+
+      - name: Setup Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run live trading bot
+        env:
+          TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
+          CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          API_KEY: ${{ secrets.API_KEY }}
+          API_SECRET: ${{ secrets.API_SECRET }}
+        run: |
+          echo "Starting live trading bot..."
+          python live_trading.py
+
